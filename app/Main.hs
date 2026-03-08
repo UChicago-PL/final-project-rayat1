@@ -1,7 +1,7 @@
 module Main where
 
 import System.Environment
--- import Data.Char
+import Data.Char
 import Text.Read
 
 import qualified Data.Map as M
@@ -15,7 +15,7 @@ data Op
 data AST
   = Var String
   | BinOp (Op, AST, AST)
-  | Num Integer
+  | Numb Integer
 
 data Token
   = TVar String
@@ -23,6 +23,10 @@ data Token
   | TNum Integer
 
 type Post = [Token]
+
+type IToken = (Integer, Token) -- Mark the character of the token
+
+type Post' = [IToken]
 
 data Rep
   = Tree AST
@@ -36,6 +40,8 @@ data NotationType
 
 type CompResult = Either String Integer
 type ParseResult = Either String Rep
+type ConstructResult = Either String String
+type NTResult = Either String NotationType
 
 
 constructPostfix :: Rep -> String
@@ -47,21 +53,40 @@ constructPrefix _ = ""
 constructInfix :: Rep -> String
 constructInfix _ = ""
 
-detectNotation :: String -> NotationType
-detectNotation _ = NTPostfix
+detectNotation :: String -> NTResult
+detectNotation [] = Left "Cannot decipher what notation was attempted"
+detectNotation (c : rest)
+  | c == '(' = detectInOrPre rest
+  | isDigit c = detectInOrPost rest False
+  | otherwise = detectNotation rest
 
-parseFull :: String -> Rep
+detectInOrPost :: String -> Bool -> NTResult
+detectInOrPost [] _ = Left "Cannot decipher what notation was attempted"
+detectInOrPost (c : rest) seenSpace
+  | isDigit c = if seenSpace then Right NTPostfix else detectInOrPost rest False
+  | isOp c = Right NTInfix
+  | otherwise = detectInOrPost rest seenSpace
+
+detectInOrPre :: String -> NTResult
+detectInOrPre [] = Left "Cannot decipher what notation was attempted"
+detectInOrPre (c : rest)
+  | isOp c = Right NTPrefix
+  | isDigit c = Right NTInfix
+  | otherwise = detectInOrPre rest
+
+isOp :: Char -> Bool
+isOp c = c == '+' || c == '*' || c == '/' || c == '-'
+
+parseFull :: String -> ParseResult
 parseFull s =
   let
     ntype = detectNotation s
   in
     case ntype of
-      NTPrefix -> Tree (parsePrefix s)
-      NTInfix -> Tree (parseInfix s)
-      NTPostfix -> List (parsePostfix s)
-
-parseAll :: String -> [Rep]
-parseAll m = map parseFull $ lines m
+      Right NTPrefix -> Right $ Tree (parsePrefix s)
+      Right NTInfix -> Right $ Tree (parseInfix s)
+      Right NTPostfix -> Right $ List (parsePostfix s)
+      Left err -> Left err
 
 toTok :: String -> Token
 toTok token =
@@ -86,7 +111,7 @@ parsePostfix s =
   in
     map toTok tokenized
 
-computePostfix :: Post -> [Integer] -> M.Map String Rep  -> CompResult
+computePostfix :: Post -> [Integer] -> M.Map String Rep -> CompResult
 computePostfix lst stk vmap =
   case lst of
     [] ->
@@ -111,7 +136,7 @@ computePostfix lst stk vmap =
         vres = vmap M.!? v
       in
         case vres of
-          Nothing -> Left $ "Variable " ++ v ++ " used but not defined"
+          Nothing -> Left $ "Variable " ++ v ++ " used but not defined (or has a parse error in its definition)"
           Just repr ->
             case computeGeneral' (Right repr) vmap of
               Left err -> Left err
@@ -120,7 +145,7 @@ computePostfix lst stk vmap =
 computeGeneral' :: ParseResult -> M.Map String Rep -> CompResult
 computeGeneral' repr vmap =
   case repr of
-    Right (Tree a) -> Right $ computeAST a
+    Right (Tree a) -> computeAST a vmap
     Right (List ls) -> computePostfix ls [] vmap
     Left err -> Left err
 
@@ -146,14 +171,33 @@ help :: String
 help = "TODO: explain arguments"
 
 
-computeAST :: AST -> Integer
-computeAST _ = 0
+computeAST :: AST -> M.Map String Rep -> CompResult
+computeAST ast vmap =
+  case ast of
+    Numb n -> Right n
+    BinOp (op, a1, a2) ->
+      let
+        a1val = computeAST a1 vmap
+        a2val = computeAST a2 vmap
+      in
+        case (a1val, a2val) of
+          (Right n1, Right n2) -> evaluate op n1 n2
+          (_, Left n2) -> Left n2
+          (Left n1, _) -> Left n1
+    Var v ->
+      let
+        vres = vmap M.!? v
+      in
+        case vres of
+          Nothing -> Left $ "Variable " ++ v ++ " used but not defined (or has a parse error in its definition)"
+          Just repr -> computeGeneral' (Right repr) vmap
+
 
 
 computeGeneral :: Rep -> String
 computeGeneral repr =
   case repr of
-    Tree a -> show $ computeAST a
+    Tree a -> show $ computeAST a M.empty
     List ls -> 
       let
         res = computePostfix ls [] M.empty
@@ -162,12 +206,20 @@ computeGeneral repr =
           Right n -> show n
           Left err -> err
 
+parseInput :: (Rep -> String) -> String -> String
+parseInput outputFn input = unlines $ parseHelper outputFn (lines input) M.empty 0
+
+parseHelper :: (Rep -> String) -> [String] -> M.Map String Rep -> Integer -> [String]
+parseHelper _ [] _ _ = []
+-- parseHelper outFn (line : rest) vmap lnum
+
+
 main :: IO ()
 main = do
   args <- getArgs
   case args of
-    ["--to", "--postfix"] -> interact $ constructPostfix . parseFull
-    ["--to", "--prefix"] -> interact $ constructPrefix . parseFull
-    ["--to", "--infix"] -> interact $ constructInfix . parseFull
-    ["--compute"] -> interact $ computeGeneral . parseFull
+    ["--to", "--postfix"] -> interact $ parseInput constructPostfix
+    ["--to", "--prefix"] -> interact $ parseInput constructPrefix
+    ["--to", "--infix"] -> interact $ parseInput constructInfix
+    ["--compute"] -> interact $ parseInput computeGeneral
     _ -> putStrLn help
