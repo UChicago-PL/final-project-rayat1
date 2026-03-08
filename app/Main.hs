@@ -34,6 +34,10 @@ data NotationType
   | NTInfix
   | NTPostfix
 
+type CompResult = Either String Integer
+type ParseResult = Either String Rep
+
+
 constructPostfix :: Rep -> String
 constructPostfix _ = ""
 
@@ -82,24 +86,54 @@ parsePostfix s =
   in
     map toTok tokenized
 
-computePostfix :: Post -> [Integer] -> M.Map String Rep  -> Integer
-computePostfix lst stk _ =
-  --
+computePostfix :: Post -> [Integer] -> M.Map String Rep  -> CompResult
+computePostfix lst stk vmap =
   case lst of
     [] ->
       case stk of
-        [] -> error "Computation does not work, stack is empty (too many operations)"
-        [n] -> n
-        _ -> error "Computation does not work, stack too full (too many integers)"
+        [] -> Left "Computation does not work, stack is empty (too many operations)"
+        [n] -> Right n
+        _ -> Left "Computation does not work, stack too full (too many integers)"
     (TBinOp op : rest) ->
       case stk of
-        [] -> error "Computation does not work, stack is empty (too many operations)"
-        [_] -> error "Computation does not work, stack is empty (too many operations)"
-        (n1 : n2 : more) -> computePostfix rest (evaluate op n1 n2 : more) M.empty
-    _ -> 0
+        [] -> Left "Computation does not work, stack is empty (too many operations)"
+        [_] -> Left "Computation does not work, stack is empty (too many operations)"
+        (n1 : n2 : more) ->
+          let
+            res = evaluate op n1 n2
+          in
+            case res of
+              Left err -> Left err
+              Right n -> computePostfix rest (n : more) vmap
+    (TNum n : rest) -> computePostfix rest (n : stk) vmap
+    (TVar v : rest) ->
+      let
+        vres = vmap M.!? v
+      in
+        case vres of
+          Nothing -> Left $ "Variable " ++ v ++ " used but not defined"
+          Just repr ->
+            case computeGeneral' (Right repr) vmap of
+              Left err -> Left err
+              Right n -> computePostfix rest (n : stk) vmap
 
-evaluate :: Op -> Integer -> Integer -> Integer
-evaluate _ _ _ = 0
+computeGeneral' :: ParseResult -> M.Map String Rep -> CompResult
+computeGeneral' repr vmap =
+  case repr of
+    Right (Tree a) -> Right $ computeAST a
+    Right (List ls) -> computePostfix ls [] vmap
+    Left err -> Left err
+
+evaluate :: Op -> Integer -> Integer -> CompResult
+evaluate op n1 n2 =
+  case op of
+    Plus -> Right (n1 + n2)
+    Minus -> Right (n1 - n2)
+    Times -> Right (n1 * n2)
+    Div ->
+      case n2 of
+        0 -> Left "Division by 0"
+        _ -> Right (n1 `div` n2)
 
 
 parseInfix :: String -> AST
@@ -115,14 +149,18 @@ help = "TODO: explain arguments"
 computeAST :: AST -> Integer
 computeAST _ = 0
 
-computeList :: Post -> Integer
-computeList _ = 0
 
 computeGeneral :: Rep -> String
 computeGeneral repr =
   case repr of
     Tree a -> show $ computeAST a
-    List ls -> show $ computeList ls
+    List ls -> 
+      let
+        res = computePostfix ls [] M.empty
+      in
+        case res of
+          Right n -> show n
+          Left err -> err
 
 main :: IO ()
 main = do
