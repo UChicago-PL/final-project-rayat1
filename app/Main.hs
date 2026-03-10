@@ -81,7 +81,7 @@ scanInput (c : rest) n
 
 scanNum :: [Char] -> [Char] -> (Int, Int, String)
 -- read is guaranteed to work since we only add numeric characters to the string
-scanNum [] acc = (read acc, length acc, "")
+scanNum [] acc = (read $ reverse acc, length acc, "")
 scanNum (c : rest) acc
   | isNumber c = scanNum rest (c : acc)
   | otherwise = (read acc, length acc, c : rest)
@@ -145,7 +145,7 @@ astToPostfix :: AST -> String
 astToPostfix ast =
   case ast of
     Var (s, _) -> s ++ " "
-    BinOp (op, a1, a2, _) -> astToPostfix a1 ++ astToPostfix a2 ++ opString op
+    BinOp (op, a1, a2, _) -> astToPostfix a1 ++ astToPostfix a2 ++ opString op ++ " "
     Numb (n, _) -> show n ++ " "
 
 listToPostfix :: Post -> String
@@ -161,7 +161,8 @@ listToPostfix ((tok, _) : rest) =
 
 listToInfix :: Post -> String
 listToInfix lst = lHelper lst [] where
-  lHelper [] _ = ""
+  lHelper [] [c] = c
+  lHelper [] _ = "Error in postfix notation (too many items left on the stack)"
   lHelper (tok : rest) stk =
     case tok of
       (TVar s, _) -> lHelper rest (s : stk)
@@ -170,7 +171,11 @@ listToInfix lst = lHelper lst [] where
         case stk of
           [] -> "(__ " ++ opString op ++ " __) " ++ lHelper rest []
           [n1] -> "( " ++ n1 ++ " " ++ opString op ++ " __) " ++ lHelper rest []
-          (n1 : n2 : stk') -> "( " ++ n1 ++ " " ++ opString op ++ " " ++ n2 ++ ")" ++ lHelper rest stk'
+          (n1 : n2 : stk') -> 
+            let
+              oper = "(" ++ n1 ++ " " ++ opString op ++ " " ++ n2 ++ ")"
+            in
+              lHelper rest (oper : stk')
       _ -> lHelper rest stk
 
 astToPrefix :: AST -> String
@@ -178,32 +183,30 @@ astToPrefix ast =
   case ast of
     Var (s, _) -> s ++ " "
     Numb (n, _) -> show n ++ " "
-    BinOp (op, a1, a2, _) -> "(" ++ opString op ++ astToPrefix a1 ++ astToPrefix a2 ++ ")"
+    BinOp (op, a1, a2, _) -> "(" ++ opString op ++ " " ++ astToPrefix a1 ++ astToPrefix a2 ++ ") "
 
 astToInfix :: AST -> String
 astToInfix ast =
   case ast of
-    Var (s, _) -> s ++ " "
-    Numb (n, _) -> show n ++ " "
-    BinOp (op, a1, a2, _) -> "(" ++ astToInfix a1 ++ opString op ++ astToInfix a2 ++ ")"
+    Var (s, _) -> s
+    Numb (n, _) -> show n
+    BinOp (op, a1, a2, _) -> "(" ++ astToInfix a1 ++ " " ++ opString op ++ " " ++ astToInfix a2 ++ ") "
 
 
 -- TODO: Fix this
 -- The best way may be converting to infix, parsing, then converting that to prefix
 -- That is a decent test that everything actually works tbf
 listToPrefix :: Post -> String
-listToPrefix lst = lHelper lst [] where
-  lHelper [] _ = ""
-  lHelper (tok : rest) stk =
-    case tok of
-      (TVar s, _) -> lHelper rest (s : stk)
-      (TNum n, _) -> lHelper rest (show n : stk)
-      (TBinOp op, _) ->
-        case stk of
-          [] -> "(" ++ opString op ++ "__ __)"
-          [n1] -> "(" ++ opString op ++ show n1 ++ " __)"
-          (n1 : n2 : _) -> "(" ++ opString op ++ " " ++ n1 ++ " " ++ n2 ++ ")"
-      _ -> ""
+listToPrefix lst =
+  let
+    infString = listToInfix lst
+    pOpt = parseInfix $ scanInput infString 0
+  in
+    case pOpt of
+      Right (ast, []) -> astToPrefix ast
+      Right (_, _) -> "Error after conversion to infix, likely was an inaccuracy in that conversion"
+      Left err -> "The following error ocurred while converting to infix: " ++ err
+
 
 -- Parsing token lists
 parseFull :: String -> Int -> ParseResult
@@ -301,7 +304,7 @@ parseInfix toklist =
     case res of
       Left err -> Left err
       Right (ast, []) -> Right (ast, [])
-      Right (_, (t, col) : _) -> Left $ "Found more tokens remaining after parsing complete at column " ++ show col ++ " " ++ show t
+      Right (_, (t, col) : _) -> Left $ "Found more tokens remaining after parsing infix complete at column " ++ show col ++ ". Starting with: " ++ show t
 
 
 -- Computation
@@ -368,7 +371,7 @@ computeAST ast vmap =
         vres = vmap M.!? v
       in
         case vres of
-          Nothing -> Left $ "Variable " ++ v ++ " used but not defined (or has a parse error in its definition)" ++
+          Nothing -> Left $ "Variable " ++ v ++ " used but not defined (or has a parse error in its definition) " ++
             "at column " ++ show col
           Just repr ->
             case computeGeneral (Right repr) vmap of
@@ -411,7 +414,7 @@ parseHelper out (('!' : rest) : nextLine) vmap =
         let
           updatedMap = M.insert vname expr vmap
         in
-          ("Variable ` " ++ vname ++ "` added to map!") : parseHelper out nextLine updatedMap
+          ("Variable `" ++ vname ++ "` added to map!") : parseHelper out nextLine updatedMap
 
 parseHelper out (ln : nextLine) vmap =
   let
@@ -433,15 +436,19 @@ parseHelper out (ln : nextLine) vmap =
                 Right n -> show n : parseHelper out nextLine vmap
 
 help :: String
-help = "TODO: explain arguments"
+help = "This program parses standard input and outputs to standard output depending on the flags\n" ++
+  "--postfix, --prefix, and --infix convert the non-assignment standard input lines to that notation form\n" ++
+  "--compute computes the non-assignment standard input lines, which can be expressions in prefix, infix, or postfix form\n" ++
+  "variables are assigned as: !name expr, the name must be all alphanumeric characters, the expression is any arithmetic expression\n" ++
+  "variables need to be defined before they are used"
 
 
 main :: IO ()
 main = do
   args <- getArgs
   case args of
-    ["--to", "--postfix"] -> interact $ parseInput ToPostfix
-    ["--to", "--prefix"] -> interact $ parseInput ToPrefix
-    ["--to", "--infix"] -> interact $ parseInput ToInfix
+    ["--postfix"] -> interact $ parseInput ToPostfix
+    ["--prefix"] -> interact $ parseInput ToPrefix
+    ["--infix"] -> interact $ parseInput ToInfix
     ["--compute"] -> interact $ parseInput Compute
     _ -> putStrLn help
