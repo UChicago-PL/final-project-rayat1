@@ -51,10 +51,16 @@ data OutputMode
   | ToPostfix
   | Compute
 
-type CompResult = Either String Int
-type ParseResult = Either String Rep
-type ConstructResult = Either String String
-type NTResult = Either String NotationType
+
+-- Key type
+type Failure a = Either String a
+
+
+dispF :: Show a => Failure a -> String
+dispF a =
+  case a of
+    Left err -> err
+    Right w -> show w
 
 -- Scanning
 scanInput :: String -> Int -> [IToken]
@@ -84,7 +90,7 @@ scanNum :: [Char] -> [Char] -> (Int, Int, String)
 scanNum [] acc = (read $ reverse acc, length acc, "")
 scanNum (c : rest) acc
   | isNumber c = scanNum rest (c : acc)
-  | otherwise = (read acc, length acc, c : rest)
+  | otherwise = (read $ reverse acc, length acc, c : rest)
 
 scanVar :: [Char] -> [Char] -> (String, String)
 scanVar [] acc = (reverse acc, "")
@@ -92,15 +98,20 @@ scanVar (c : rest) acc
   | isAlpha c = scanVar rest (c : acc)
   | otherwise = (reverse acc, c : rest)
 
+nextWord :: String -> String -> (String, String)
+nextWord [] acc = (reverse acc, "")
+nextWord (c : rest) acc
+  | isAlpha c = nextWord rest (c : acc)
+  | otherwise = (reverse acc, c : rest)
 
-detectNotation :: String -> NTResult
+detectNotation :: String -> Failure NotationType
 detectNotation [] = Left "Cannot decipher what notation was attempted"
 detectNotation (c : rest)
   | c == '(' = detectInOrPre rest
   | isDigit c || isAlpha c = detectInOrPost rest False
   | otherwise = detectNotation rest
 
-detectInOrPost :: String -> Bool -> NTResult
+detectInOrPost :: String -> Bool -> Failure NotationType
 detectInOrPost [] _ = Left "Cannot decipher what notation was attempted"
 detectInOrPost (c : rest) seenSpace
   | isDigit c || isAlpha c = if seenSpace then Right NTPostfix else detectInOrPost rest False
@@ -108,7 +119,7 @@ detectInOrPost (c : rest) seenSpace
   | isSpace c = detectInOrPost rest True
   | otherwise = detectInOrPost rest seenSpace
 
-detectInOrPre :: String -> NTResult
+detectInOrPre :: String -> Failure NotationType
 detectInOrPre [] = Left "Cannot decipher what notation was attempted"
 detectInOrPre (c : rest)
   | isOp c = Right NTPrefix
@@ -171,7 +182,7 @@ listToInfix lst = lHelper lst [] where
         case stk of
           [] -> "(__ " ++ opString op ++ " __) " ++ lHelper rest []
           [n1] -> "( " ++ n1 ++ " " ++ opString op ++ " __) " ++ lHelper rest []
-          (n1 : n2 : stk') -> 
+          (n1 : n2 : stk') ->
             let
               oper = "(" ++ n1 ++ " " ++ opString op ++ " " ++ n2 ++ ")"
             in
@@ -193,9 +204,6 @@ astToInfix ast =
     BinOp (op, a1, a2, _) -> "(" ++ astToInfix a1 ++ " " ++ opString op ++ " " ++ astToInfix a2 ++ ") "
 
 
--- TODO: Fix this
--- The best way may be converting to infix, parsing, then converting that to prefix
--- That is a decent test that everything actually works tbf
 listToPrefix :: Post -> String
 listToPrefix lst =
   let
@@ -204,12 +212,15 @@ listToPrefix lst =
   in
     case pOpt of
       Right (ast, []) -> astToPrefix ast
-      Right (_, _) -> "Error after conversion to infix, likely was an inaccuracy in that conversion"
+      Right (_, _) -> "Error after conversion to infix, likely was an inaccuracy in that conversion (This is likely the programmer's fault, not yours!)"
       Left err -> "The following error ocurred while converting to infix: " ++ err
 
 
+monadHelper :: (AST, [IToken]) -> Failure Rep
+monadHelper (parseRes, []) = Right $ Tree parseRes
+monadHelper (_, (_, col) : _) = Left $ "Found additional tokens at " ++ show col ++ " after finishing parsing"
 -- Parsing token lists
-parseFull :: String -> Int -> ParseResult
+parseFull :: String -> Int -> Failure Rep
 parseFull s n =
   let
     ntype = detectNotation s
@@ -223,6 +234,7 @@ parseFull s n =
             Left err -> Left err
             Right (parseRes, []) -> Right $ Tree parseRes
             Right (_, (_, col) : _) -> Left $ "Found additional tokens at " ++ show col ++ " after finishing parsing"
+
       Right NTInfix ->
         let
           pOpt = parseInfix $ scanInput s n
@@ -308,7 +320,7 @@ parseInfix toklist =
 
 
 -- Computation
-computeGeneral :: ParseResult -> M.Map String Rep -> CompResult
+computeGeneral :: Failure Rep -> M.Map String Rep -> Failure Int
 computeGeneral repr vmap =
   case repr of
     Right (Tree a) -> computeAST a vmap
@@ -316,7 +328,7 @@ computeGeneral repr vmap =
     Left err -> Left err
 
 
-computePostfix :: Post -> [Int] -> M.Map String Rep -> CompResult
+computePostfix :: Post -> [Int] -> M.Map String Rep -> Failure Int
 computePostfix lst stk vmap =
   case lst of
     [] ->
@@ -350,7 +362,7 @@ computePostfix lst stk vmap =
               Right n -> computePostfix rest (n : stk) vmap
     ((_, _) : rest) -> computePostfix rest stk vmap
 
-computeAST :: AST -> M.Map String Rep -> CompResult
+computeAST :: AST -> M.Map String Rep -> Failure Int
 computeAST ast vmap =
   case ast of
     Numb (n, _) -> Right n
@@ -379,7 +391,7 @@ computeAST ast vmap =
               Right n -> Right n
 
 
-evaluate :: Op -> Int -> Int -> CompResult
+evaluate :: Op -> Int -> Int -> Failure Int
 evaluate op n1 n2 =
   case op of
     Plus -> Right (n1 + n2)
@@ -392,51 +404,64 @@ evaluate op n1 n2 =
 
 
 
-parseInput :: OutputMode -> String -> String
-parseInput outputFn input = unlines $ parseHelper outputFn (lines input) M.empty
+parseInput :: OutputMode -> M.Map String Rep -> String -> String
+parseInput outputFn vmap input = unlines $ parseHelper outputFn (lines input) vmap
 
-nextWord :: String -> String -> (String, String)
-nextWord [] acc = (reverse acc, "")
-nextWord (c : rest) acc
-  | isAlpha c = nextWord rest (c : acc)
-  | otherwise = (reverse acc, c : rest)
 
-parseHelper :: OutputMode -> [String] -> M.Map String Rep -> [String]
-parseHelper _ [] _ = []
-parseHelper out (('!' : rest) : nextLine) vmap =
+parseLine :: OutputMode -> String -> M.Map String Rep -> (String, M.Map String Rep)
+parseLine _ ('!' : rest) vmap =
   let
     (vname, rest') = nextWord rest ""
     vexpr = parseFull rest' (2 + length vname)
   in
     case vexpr of
-      Left err -> ("Variable " ++ vname ++ " not parsed due to " ++ err) : parseHelper out nextLine vmap
-      Right expr ->
-        let
-          updatedMap = M.insert vname expr vmap
-        in
-          ("Variable `" ++ vname ++ "` added to map!") : parseHelper out nextLine updatedMap
-
-parseHelper out (ln : nextLine) vmap =
+      Left err -> ("Variable " ++ vname ++ " not parsed due to " ++ err, vmap)
+      Right expr -> ("Variable `" ++ vname ++ "` added to map!", M.insert vname expr vmap)
+parseLine out ln vmap =
   let
     expr = parseFull ln 1
   in
     case expr of
-      Left err -> ("Line not parsed due to " ++ err) : parseHelper out nextLine vmap
+      Left err -> ("Line not parsed due to " ++ err, vmap)
       Right repr ->
         case out of
-          ToPostfix -> constructPostfix repr : parseHelper out nextLine vmap
-          ToPrefix -> constructPrefix repr : parseHelper out nextLine vmap
-          ToInfix -> constructInfix repr : parseHelper out nextLine vmap
-          Compute ->
-            let
-              res = computeGeneral (Right repr) vmap
-            in
-              case res of
-                Left err -> err : parseHelper out nextLine vmap
-                Right n -> show n : parseHelper out nextLine vmap
+          ToPostfix -> (constructPostfix repr, vmap)
+          ToPrefix -> (constructPrefix repr, vmap)
+          ToInfix -> (constructInfix repr, vmap)
+          Compute -> (dispF $ computeGeneral (Right repr) vmap, vmap)
+
+parseHelper :: OutputMode -> [String] -> M.Map String Rep -> [String]
+parseHelper _ [] _ = []
+parseHelper out (ln : rest) vmap =
+  let
+    (result, updatedMap) = parseLine out ln vmap
+  in
+    result : parseHelper out rest updatedMap
+
+repl :: M.Map String Rep -> OutputMode -> IO ()
+repl vmap mode = do
+  line <- getLine
+  case line of
+    "quit" -> putStrLn "Have a nice day!"
+    "Compute" -> do
+        putStrLn "Mode changed to computation! Will now compute non-assignment lines"
+        repl vmap Compute
+    "Postfix" -> do
+        putStrLn "Mode changed to postfix! Will now convert non-assignment lines to postfix"
+        repl vmap ToPostfix
+    "Prefix" -> do
+        putStrLn "Mode changed to prefix! Will now convert non-assignment lines to prefix"
+        repl vmap ToPrefix
+    "Infix" -> do
+        putStrLn "Mode changed to infix! Will now convert non-assignment lines to infix"
+        repl vmap ToInfix
+    _ -> do
+      let (result, updatedMap) = parseLine mode line vmap
+      putStrLn result
+      repl updatedMap mode
 
 help :: String
-help = "This program parses standard input and outputs to standard output depending on the flags\n" ++
+help = "Prefix" ++
   "--postfix, --prefix, and --infix convert the non-assignment standard input lines to that notation form\n" ++
   "--compute computes the non-assignment standard input lines, which can be expressions in prefix, infix, or postfix form\n" ++
   "variables are assigned as: !name expr, the name must be all alphanumeric characters, the expression is any arithmetic expression\n" ++
@@ -447,8 +472,12 @@ main :: IO ()
 main = do
   args <- getArgs
   case args of
-    ["--postfix"] -> interact $ parseInput ToPostfix
-    ["--prefix"] -> interact $ parseInput ToPrefix
-    ["--infix"] -> interact $ parseInput ToInfix
-    ["--compute"] -> interact $ parseInput Compute
+    ["--postfix"] -> interact $ parseInput ToPostfix M.empty
+    ["--prefix"] -> interact $ parseInput ToPrefix M.empty
+    ["--infix"] -> interact $ parseInput ToInfix M.empty
+    ["--compute"] -> interact $ parseInput Compute M.empty
+    ["--repl"] -> repl M.empty Compute
     _ -> putStrLn help
+
+
+
