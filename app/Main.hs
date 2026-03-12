@@ -2,7 +2,6 @@ module Main where
 
 import System.Environment
 import Data.Char
--- import Text.Read
 
 import qualified Data.Map as M
 
@@ -83,7 +82,7 @@ scanInput (c : rest) n
   | c == '/' = (TBinOp Div, n) : scanInput rest (n + 1)
   | c == '(' = (TOPar, n) : scanInput rest (n + 1)
   | c == ')' = (TCPar, n) : scanInput rest (n + 1)
-  | otherwise = scanInput rest (n + 1)
+  | otherwise = scanInput rest (n + 1) --All characters we don't understand are skipped
 
 scanNum :: [Char] -> [Char] -> (Int, Int, String)
 -- read is guaranteed to work since we only add numeric characters to the string
@@ -92,16 +91,10 @@ scanNum (c : rest) acc
   | isNumber c = scanNum rest (c : acc)
   | otherwise = (read $ reverse acc, length acc, c : rest)
 
-scanVar :: [Char] -> [Char] -> (String, String)
+scanVar :: String -> String -> (String, String)
 scanVar [] acc = (reverse acc, "")
 scanVar (c : rest) acc
   | isAlpha c = scanVar rest (c : acc)
-  | otherwise = (reverse acc, c : rest)
-
-nextWord :: String -> String -> (String, String)
-nextWord [] acc = (reverse acc, "")
-nextWord (c : rest) acc
-  | isAlpha c = nextWord rest (c : acc)
   | otherwise = (reverse acc, c : rest)
 
 detectNotation :: String -> Failure NotationType
@@ -216,32 +209,20 @@ listToPrefix lst =
       Left err -> "The following error ocurred while converting to infix: " ++ err
 
 
-monadHelper :: (AST, [IToken]) -> Failure Rep
-monadHelper (parseRes, []) = Right $ Tree parseRes
-monadHelper (_, (_, col) : _) = Left $ "Found additional tokens at " ++ show col ++ " after finishing parsing"
+
 -- Parsing token lists
-parseFull :: String -> Int -> Failure Rep
-parseFull s n =
+parseMonadHelper :: (AST, [IToken]) -> Failure (AST, [IToken])
+parseMonadHelper (parseRes, []) = Right (parseRes, [])
+parseMonadHelper (_, (_, col) : _) = Left $ "Found additional tokens at column " ++ show col ++ " after finishing parsing"
+
+parseLine :: String -> Int -> Failure Rep
+parseLine s n =
   let
     ntype = detectNotation s
   in
     case ntype of
-      Right NTPrefix ->
-        let
-          pOpt = parsePrefix $ scanInput s n
-        in
-          case pOpt of
-            Left err -> Left err
-            Right (parseRes, []) -> Right $ Tree parseRes
-            Right (_, (_, col) : _) -> Left $ "Found additional tokens at " ++ show col ++ " after finishing parsing"
-
-      Right NTInfix ->
-        let
-          pOpt = parseInfix $ scanInput s n
-        in
-          case pOpt of
-            Left err -> Left err
-            Right (parseRes, _) -> Right $ Tree parseRes
+      Right NTPrefix -> fmap (Tree . fst) $ parsePrefix (scanInput s n) >>= parseMonadHelper
+      Right NTInfix -> fmap (Tree . fst) $ parseInfix (scanInput s n) >>= parseMonadHelper
       Right NTPostfix -> Right $ List (scanInput s n)
       Left err -> Left err
 
@@ -262,43 +243,53 @@ parsePrefix ((_, col) : _) = Left $ "Parse failed at column " ++ show col ++
   " . Might be missing an opening `(` before an operation, or incorrectly placed one before a number"
 
 
-parseInfix :: [IToken] -> Either String (AST, [IToken])
+parseInfix :: [IToken] -> Failure (AST, [IToken])
 parseInfix toklist =
   let
-    nextAddExp :: [IToken] -> Either String (AST, [IToken])
-    nextAddExp tlist =
-        case nextMulExp tlist of
-          Left err -> Left err
-          Right (a1, toks) ->
-            case toks of
-              ((TBinOp Plus, col) : rest) ->
-                case nextAddExp rest of
-                  Left err -> Left err
-                  Right (a2, toks') ->
-                    Right (BinOp (Plus, a1, a2, col), toks')
-              ((TBinOp Minus, col) : rest) ->
-                case nextAddExp rest of
-                  Left err -> Left err
-                  Right (a2, toks') ->
-                    Right (BinOp (Minus, a1, a2, col), toks')
-              _ -> Right (a1, toks)
-    nextMulExp :: [IToken] -> Either String (AST, [IToken])
-    nextMulExp tlist =
-        case nextFactor tlist of
-          Left err -> Left err
-          Right (a1, toks) ->
-            case toks of
-              ((TBinOp Times, col) : rest) ->
-                case nextFactor rest of
-                  Left err -> Left err
-                  Right (a2, toks') ->
-                    Right (BinOp (Times, a1, a2, col), toks')
-              ((TBinOp Div, col) : rest) ->
-                case nextFactor rest of
-                  Left err -> Left err
-                  Right (a2, toks') ->
-                    Right (BinOp (Div, a1, a2, col), toks')
-              _ -> Right (a1, toks)
+    nextAddExpHelper :: Failure (AST, [IToken]) -> Failure (AST, [IToken])
+    nextAddExpHelper term_w_tlist =
+        case term_w_tlist of
+          Right (term, (TBinOp Plus, col) : rest) ->
+            let
+              nextTerm = nextMulExp rest
+            in
+              case nextTerm of
+                Left err -> Left err
+                Right (nTerm, nToks) -> nextAddExpHelper $ Right (BinOp (Plus, term, nTerm, col), nToks)
+          Right (term, (TBinOp Minus, col) : rest) ->
+            let
+              nextTerm = nextMulExp rest
+            in
+              case nextTerm of
+                Left err -> Left err
+                Right (nTerm, nToks) -> nextAddExpHelper $ Right (BinOp (Minus, term, nTerm, col), nToks)
+          _ -> term_w_tlist
+
+    nextAddExp :: [IToken] -> Failure (AST, [IToken])
+    nextAddExp tlist = nextAddExpHelper (nextMulExp tlist)
+
+    nextMulExpHelper :: Failure (AST, [IToken]) -> Failure (AST, [IToken])
+    nextMulExpHelper term_w_tlist =
+        case term_w_tlist of
+          Right (term, (TBinOp Times, col) : rest) ->
+            let
+              nextTerm = nextFactor rest
+            in
+              case nextTerm of
+                Left err -> Left err
+                Right (nTerm, nToks) -> nextMulExpHelper $ Right (BinOp (Times, term, nTerm, col), nToks)
+          Right (term, (TBinOp Div, col) : rest) ->
+            let
+              nextTerm = nextMulExp rest
+            in
+              case nextTerm of
+                Left err -> Left err
+                Right (nTerm, nToks) -> nextMulExpHelper $ Right (BinOp (Div, term, nTerm, col), nToks)
+          _ -> term_w_tlist
+
+    nextMulExp :: [IToken] -> Failure (AST, [IToken])
+    nextMulExp tlist = nextMulExpHelper (nextFactor tlist)
+
     nextFactor :: [IToken] -> Either String (AST, [IToken])
     nextFactor tlist =
       case tlist of
@@ -311,12 +302,8 @@ parseInfix toklist =
         ((TVar s, col) : rest) -> Right (Var (s, col), rest)
         ((_, col) : _) -> Left $ "Parse error at column " ++ show col ++ ". Unexpected token"
         [] -> Left "Parse error at end of line"
-    res = nextAddExp toklist
   in
-    case res of
-      Left err -> Left err
-      Right (ast, []) -> Right (ast, [])
-      Right (_, (t, col) : _) -> Left $ "Found more tokens remaining after parsing infix complete at column " ++ show col ++ ". Starting with: " ++ show t
+    nextAddExp toklist >>= parseMonadHelper
 
 
 -- Computation
@@ -340,7 +327,8 @@ computePostfix lst stk vmap =
       case stk of
         [] -> Left $ "Computation does not work, stack is empty (too many operations)" ++
                   "Error with " ++ opString op ++ "at column " ++ show col
-        [_] -> Left "Computation does not work, stack is empty (too many operations)"
+        [_] -> Left $ "Computation does not work, stack is empty (too many operations)" ++
+                "Error with " ++ opString op ++ "at column " ++ show col
         (n1 : n2 : more) ->
           let
             res = evaluate op n2 n1
@@ -404,22 +392,22 @@ evaluate op n1 n2 =
 
 
 
-parseInput :: OutputMode -> M.Map String Rep -> String -> String
-parseInput outputFn vmap input = unlines $ parseHelper outputFn (lines input) vmap
+handleInput :: OutputMode -> M.Map String Rep -> String -> String
+handleInput outputFn vmap input = unlines $ inputHelper outputFn (lines input) vmap
 
 
-parseLine :: OutputMode -> String -> M.Map String Rep -> (String, M.Map String Rep)
-parseLine _ ('!' : rest) vmap =
+handleLine :: OutputMode -> String -> M.Map String Rep -> (String, M.Map String Rep)
+handleLine _ ('!' : rest) vmap =
   let
-    (vname, rest') = nextWord rest ""
-    vexpr = parseFull rest' (2 + length vname)
+    (vname, rest') = scanVar rest ""
+    vexpr = parseLine rest' (2 + length vname)
   in
     case vexpr of
       Left err -> ("Variable " ++ vname ++ " not parsed due to " ++ err, vmap)
       Right expr -> ("Variable `" ++ vname ++ "` added to map!", M.insert vname expr vmap)
-parseLine out ln vmap =
+handleLine out ln vmap =
   let
-    expr = parseFull ln 1
+    expr = parseLine ln 1
   in
     case expr of
       Left err -> ("Line not parsed due to " ++ err, vmap)
@@ -430,13 +418,13 @@ parseLine out ln vmap =
           ToInfix -> (constructInfix repr, vmap)
           Compute -> (dispF $ computeGeneral (Right repr) vmap, vmap)
 
-parseHelper :: OutputMode -> [String] -> M.Map String Rep -> [String]
-parseHelper _ [] _ = []
-parseHelper out (ln : rest) vmap =
+inputHelper :: OutputMode -> [String] -> M.Map String Rep -> [String]
+inputHelper _ [] _ = []
+inputHelper out (ln : rest) vmap =
   let
-    (result, updatedMap) = parseLine out ln vmap
+    (result, updatedMap) = handleLine out ln vmap
   in
-    result : parseHelper out rest updatedMap
+    result : inputHelper out rest updatedMap
 
 repl :: M.Map String Rep -> OutputMode -> IO ()
 repl vmap mode = do
@@ -456,7 +444,7 @@ repl vmap mode = do
         putStrLn "Mode changed to infix! Will now convert non-assignment lines to infix"
         repl vmap ToInfix
     _ -> do
-      let (result, updatedMap) = parseLine mode line vmap
+      let (result, updatedMap) = handleLine mode line vmap
       putStrLn result
       repl updatedMap mode
 
@@ -472,10 +460,10 @@ main :: IO ()
 main = do
   args <- getArgs
   case args of
-    ["--postfix"] -> interact $ parseInput ToPostfix M.empty
-    ["--prefix"] -> interact $ parseInput ToPrefix M.empty
-    ["--infix"] -> interact $ parseInput ToInfix M.empty
-    ["--compute"] -> interact $ parseInput Compute M.empty
+    ["--postfix"] -> interact $ handleInput ToPostfix M.empty
+    ["--prefix"] -> interact $ handleInput ToPrefix M.empty
+    ["--infix"] -> interact $ handleInput ToInfix M.empty
+    ["--compute"] -> interact $ handleInput Compute M.empty
     ["--repl"] -> repl M.empty Compute
     _ -> putStrLn help
 

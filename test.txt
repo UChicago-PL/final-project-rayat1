@@ -10,3 +10,5 @@ bye bye bye + -
 !someVar (1 + 3))
 3 someVar + 159 - 9 *
 7 bye +
+bye * bye * bye * bye * bye * bye
+bye * bye + bye + bye
