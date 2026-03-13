@@ -48,7 +48,7 @@ data OutputMode
   = ToPrefix
   | ToInfix
   | ToPostfix
-  | Compute
+  | Compute deriving Show
 
 
 -- Key type
@@ -97,6 +97,11 @@ scanVar (c : rest) acc
   | isAlpha c = scanVar rest (c : acc)
   | otherwise = (reverse acc, c : rest)
 
+
+-- Notation detection
+isOp :: Char -> Bool
+isOp c = c == '+' || c == '*' || c == '/' || c == '-'
+
 detectNotation :: String -> Failure NotationType
 detectNotation [] = Left "Cannot decipher what notation was attempted"
 detectNotation (c : rest)
@@ -118,10 +123,6 @@ detectInOrPre (c : rest)
   | isOp c = Right NTPrefix
   | isDigit c || isAlpha c = Right NTInfix
   | otherwise = detectInOrPre rest
-
-isOp :: Char -> Bool
-isOp c = c == '+' || c == '*' || c == '/' || c == '-'
-
 
 
 
@@ -392,6 +393,7 @@ evaluate op n1 n2 =
 
 
 
+-- Interaction
 handleInput :: OutputMode -> M.Map String Rep -> String -> String
 handleInput outputFn vmap input = unlines $ inputHelper outputFn (lines input) vmap
 
@@ -428,6 +430,7 @@ inputHelper out (ln : rest) vmap =
 
 repl :: M.Map String Rep -> OutputMode -> IO ()
 repl vmap mode = do
+  putStrLn $ "Currently in mode: " ++ show mode
   line <- getLine
   case line of
     "quit" -> putStrLn "Have a nice day!"
@@ -443,17 +446,28 @@ repl vmap mode = do
     "Infix" -> do
         putStrLn "Mode changed to infix! Will now convert non-assignment lines to infix"
         repl vmap ToInfix
+    "help" -> do
+      putStrLn helpRepl
+      repl vmap mode
     _ -> do
       let (result, updatedMap) = handleLine mode line vmap
       putStrLn result
       repl updatedMap mode
 
+helpRepl :: String
+helpRepl = "The REPL will parse variable lines and store the expression associated with the variable.\n" ++
+  "Lines which do not assign variables will be handled according to the current mode. The available modes are:\n" ++
+  "Compute, Postfix, Prefix, or Infix. Type the mode name at the REPL to change the mode\n" ++
+  "Compute mode will compute the expression, the other modes will convert the expression into the desired notation type\n" ++
+  "Tip: call the program with `rlwrap` for arrow keys and stuff in the REPL"
+
 help :: String
-help = "Prefix" ++
+help =
   "--postfix, --prefix, and --infix convert the non-assignment standard input lines to that notation form\n" ++
   "--compute computes the non-assignment standard input lines, which can be expressions in prefix, infix, or postfix form\n" ++
   "variables are assigned as: !name expr, the name must be all alphanumeric characters, the expression is any arithmetic expression\n" ++
-  "variables need to be defined before they are used"
+  "variables need to be defined before they are used.\n" ++
+  "Pass the --repl flag to start a REPL where you can use the calculator and define variables. Type `help` in the REPL for more help"
 
 
 main :: IO ()
@@ -464,7 +478,9 @@ main = do
     ["--prefix"] -> interact $ handleInput ToPrefix M.empty
     ["--infix"] -> interact $ handleInput ToInfix M.empty
     ["--compute"] -> interact $ handleInput Compute M.empty
-    ["--repl"] -> repl M.empty Compute
+    ["--repl"] -> do
+      putStrLn "Type `help` for help"
+      repl M.empty Compute
     _ -> putStrLn help
 
 

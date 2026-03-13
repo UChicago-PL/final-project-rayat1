@@ -1,0 +1,18 @@
+10
+-1
+Division by 0 at column 5
+0
+Variable `hi` added to map!
+Variable `bye` added to map!
+20
+4
+-2
+Variable someVar not parsed due to Found additional tokens at column 17 after finishing parsing
+Variable `someVar` used but not defined (or had a parse error in its definition) at column 3
+9
+16
+8
+Variable `someVar` added to map!
+16
+6
+Line not parsed due to Cannot decipher what notation was attempted
